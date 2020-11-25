@@ -1,0 +1,23 @@
+{
+    "run": {
+        "epsilons": [null],
+        "basis_params": {
+            "basis_type": "dct",
+            "function": "constant",
+            "frequence_range": [0, 0.5],
+            "zig_zag": true
+        }
+    },
+    "init": {
+        "steps": 5,
+        "BS_gamma": 0.01,
+        "BS_max_iteration": 10,
+        "rho": 0.98,
+        "theta_max": 30,
+        "evolution": "circular",
+        "last_direction_ortho": 100,
+        "with_BS": false,
+        "with_interp": false,
+        "with_BS_alpha": true
+    }
+}
