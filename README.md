@@ -1,7 +1,8 @@
 You will find in this Git, the code to perform SurFree attack, based on the *Foolbox* library.
 
-
 # SurFree: a fast surrogate-free black-box attack
+
+Paper : https://arxiv.org/abs/2011.12807 
 
 Machine learning classifiers are critically prone to evasion attacks. Adversarial examples are slightly modified inputs that are then misclassified, while remaining perceptively close to their originals. Last couple of years have witnessed a striking decrease in the amount of queries a black box attack submits to the target classifier, in order to forge adversarials. This particularly concerns the blackbox score-based setup, where the attacker has access to top predicted probabilites: the amount of queries went from to millions of to less than a thousand. 
 
@@ -22,7 +23,7 @@ pip install -r requirements
 git clone https://github.com/bethgelab/foolbox
 ```
 
-* Move surfree.py and surfree_utils.py in the folder *./foolbox/attacks/*:
+* Move surfree.py in the folder *./foolbox/attacks/*:
 
 * Update *./foolbox/attacks/__init__.py* with the following line:
 
@@ -43,5 +44,13 @@ You can change the SurFree parameters by giving to him in parameter a *config.js
 
 # Citation
 
-
-*Citation is coming*
+```
+@misc{maho2020surfree,
+      title={SurFree: a fast surrogate-free black-box attack}, 
+      author={Thibault Maho and Teddy Furon and Erwan Le Merrer},
+      year={2020},
+      eprint={2011.12807},
+      archivePrefix={arXiv},
+      primaryClass={cs.CR}
+}
+```
