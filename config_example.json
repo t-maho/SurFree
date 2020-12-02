@@ -4,8 +4,7 @@
         "basis_params": {
             "basis_type": "dct",
             "function": "constant",
-            "frequence_range": [0, 0.5],
-            "zig_zag": true
+            "frequence_range": [0, 0.5]
         }
     },
     "init": {
@@ -13,11 +12,11 @@
         "BS_gamma": 0.01,
         "BS_max_iteration": 10,
         "rho": 0.98,
+	    "T": 3,
         "theta_max": 30,
-        "evolution": "circular",
-        "last_direction_ortho": 100,
-        "with_BS": false,
-        "with_interp": false,
-        "with_BS_alpha": true
+        "n_ortho": 100,
+        "with_distance_line_search": false,
+        "with_interpolation": false,
+        "with_alpha_line_search": true
     }
 }
