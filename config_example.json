@@ -3,16 +3,20 @@
         "epsilons": [null],
         "basis_params": {
             "basis_type": "dct",
-            "function": "constant",
+            "function": "tanh",
+            "dct_type": "8x8",
+            "gamma": 3,
+            "beta": 0.01,
             "frequence_range": [0, 0.5]
         }
     },
     "init": {
-        "steps": 5,
-        "BS_gamma": 0.01,
-        "BS_max_iteration": 10,
-        "rho": 0.98,
-	    "T": 3,
+        "max_queries": 500,
+        "steps": 100,
+        "BS_gamma": 0.05,
+        "BS_max_iteration": 7,
+        "rho": 0.95,
+        "T": 1,
         "theta_max": 30,
         "n_ortho": 100,
         "with_distance_line_search": false,
