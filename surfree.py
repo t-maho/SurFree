@@ -48,7 +48,7 @@ class SurFree(MinimizationAttack):
             theta_max (int, optional): max theta watched to evaluate the direction. Defaults to 30.
             evolution (str, optional): Move in this direction. It can be linear or circular. Defaults to "circular".
             n_ortho (int, optional): Orthogonalize with the n last directions. Defaults to 100.
-            rho (float, optional): Malus/Bonus factor given to the theta_max. Defaults to 0.98.
+            rho (float, optional): Bonus/Malus factor given to the theta_max for each direction tried. Defaults to 0.98.
             T (int, optional): How many evaluation done to evaluated a direction. Defaults to 1.
             with_alpha_line_search (bool, optional): Activate Binary Search on Theta. Defaults to True.
             with_distance_line_search (bool, optional): Activate Binary Search between adversarial and x_o. Defaults to False.
@@ -56,9 +56,7 @@ class SurFree(MinimizationAttack):
         """
         # Attack Parameters
         self._BS_gamma = BS_gamma
-
         self._BS_max_iteration = BS_max_iteration
-
         self._steps = steps
         self._max_queries = max_queries
         self.best_advs = None
@@ -78,6 +76,7 @@ class SurFree(MinimizationAttack):
         self.n_ortho = n_ortho
         self._directions_ortho: Dict[int, ep.Tensor] = {}
         self._nqueries: Dict[int, int] = {}
+        self._basis: Basis = None
 
     def get_nqueries(self) -> Dict:
         return self._nqueries
@@ -110,6 +109,7 @@ class SurFree(MinimizationAttack):
             raise ValueError("starting_points {} doesn't exist.".format(starting_points))
 
         assert self._is_adversarial(best_advs).all()
+
         # Initialize the direction orthogonalized with the first direction
         fd = best_advs - originals
         norm = ep.norms.l2(fd.flatten(1), axis=1)
@@ -136,6 +136,8 @@ class SurFree(MinimizationAttack):
 
             is_success = self.distance(best_candidates, originals) < self.distance(best_advs, originals)
             best_advs = ep.where(atleast_kd(is_success, best_candidates.ndim), ep.astensor(best_candidates), best_advs)
+            print(self._nqueries)
+            print(l2(best_advs, originals))
 
             if all(v > self._max_queries for v in self._nqueries.values()):
                 print("Max queries attained for all the images.")
@@ -158,6 +160,7 @@ class SurFree(MinimizationAttack):
         epsilons = ep.zeros(originals, len(originals))
         direction_2 = ep.zeros_like(originals)
         while (epsilons == 0).any():
+            # if epsilon ==0, we are still searching a good direction
             direction_2 = ep.where(
                 atleast_kd(epsilons == 0, direction_2.ndim),
                 self._basis.get_vector(self._directions_ortho),
@@ -166,18 +169,20 @@ class SurFree(MinimizationAttack):
             
             for i, eps_i in enumerate(epsilons):
                 if eps_i == 0:
-                    # Concatenate the first directions and the last directions generated
-                    self._directions_ortho[i] = ep.concatenate((
-                        self._directions_ortho[i][:1],
-                        self._directions_ortho[i][1 + len(self._directions_ortho[i]) - self.n_ortho:], 
-                        direction_2[i].expand_dims(0)), axis=0)
+                    self._directions_ortho[i] = ep.concatenate((self._directions_ortho[i], direction_2[i].expand_dims(0)), axis=0)
+                    if len(self._directions_ortho[i]) > self.n_ortho + 1:
+                        self._directions_ortho[i] = ep.concatenate((self._directions_ortho[i][:1], self._directions_ortho[i][self.n_ortho:]))
                         
             function_evolution = self._get_evolution_function(originals, best_advs, direction_2)
-            new_epsilons = self._get_best_theta(originals, function_evolution, epsilons)
+            new_epsilons = self._get_best_theta(function_evolution, epsilons)
 
             self.theta_max = ep.where(new_epsilons == 0, self.theta_max * self.rho, self.theta_max)
             self.theta_max = ep.where((new_epsilons != 0) * (epsilons == 0), self.theta_max / self.rho, self.theta_max)
             epsilons = new_epsilons
+
+        function_evolution = self._get_evolution_function(originals, best_advs, direction_2)
+        if self.with_alpha_line_search:
+            epsilons = self._alpha_binary_search(function_evolution, epsilons)
 
         epsilons = epsilons.expand_dims(0)
         if self.with_interpolation:
@@ -201,44 +206,56 @@ class SurFree(MinimizationAttack):
 
         return candidates
 
-    def _get_evolution_function(self, originals: ep.Tensor, best_advs: ep.Tensor, direction_2: ep.Tensor) -> Callable[[ep.Tensor], ep.Tensor]:
+    def _get_evolution_function(self, originals: ep.Tensor, best_advs: ep.Tensor, direction2: ep.Tensor) -> Callable[[ep.Tensor], ep.Tensor]:
         distances = self.distance(best_advs, originals)
-        direction_1 = (best_advs - originals).flatten(start=1) / distances.reshape((-1, 1))
-        direction_1 = direction_1.reshape(originals.shape)
-        return lambda theta: (originals + self._add_step_in_circular_direction(direction_1, direction_2, distances, theta)).clip(0, 1)
+        direction1 = (best_advs - originals).flatten(start=1) / distances.reshape((-1, 1))
+        direction1 = direction1.reshape(originals.shape)
+        distances = atleast_kd(distances, direction1.ndim)
+
+        def _add_step_in_circular_direction(degree: ep.Tensor) -> ep.Tensor:
+            degree = atleast_kd(degree, direction1.ndim).raw * np.pi / 180
+            results = self._cos(degree) * direction1 + self._sin(degree) * direction2
+            results = results * distances * self._cos(degree)
+            return (originals + ep.astensor(results)).clip(0, 1)
+
+        return _add_step_in_circular_direction
 
     def _get_best_theta(
             self, 
-            originals: ep.Tensor, 
             function_evolution: Callable[[ep.Tensor], ep.Tensor], 
             best_params: ep.Tensor) -> ep.Tensor:
-        coefficients = ep.zeros(originals, 2 * self.T).raw
+        v_type = function_evolution(best_params)
+        coefficients = ep.zeros(v_type, 2 * self.T).raw
         for i in range(0, self.T):
             coefficients[2* i] = 1 - (i / self.T)
             coefficients[2 * i + 1] = - coefficients[2* i]
 
         for i,  coeff in enumerate(coefficients):
             params = coeff * self.theta_max
-            params = ep.where(ep.astensor(best_params == 0), params, ep.zeros_like(params))
-            x = function_evolution(params)
+            x_evol = function_evolution(params)
+            x = ep.where(
+                atleast_kd(best_params == 0, v_type.ndim), 
+                x_evol, 
+                ep.zeros_like(v_type))
+
             is_advs = self._is_adversarial(x)
+
             best_params = ep.where(
-                ep.logical_and(best_params == 0, is_advs),
+                (best_params == 0) * is_advs,
                 params,
                 best_params
             )
-        if (best_params == 0).all() or not self.with_alpha_line_search:
-            return best_params
-        else:
-            return self._alpha_binary_search(function_evolution, best_params, best_params != 0)
+            if (best_params != 0).all():
+                break
+        
+        return best_params  
 
     def _alpha_binary_search(
             self, 
             function_evolution: Callable[[ep.Tensor], ep.Tensor], 
-            lower: ep.Tensor, 
-            mask: ep.Tensor) -> ep.Tensor:    
+            lower: ep.Tensor) -> ep.Tensor:    
         # Upper --> not adversarial /  Lower --> adversarial
-        
+        v_type = function_evolution(lower)
         def get_alpha(theta: ep.Tensor) -> ep.Tensor:
             return 1 - ep.astensor(self._cos(theta.raw * np.pi / 180))
 
@@ -246,43 +263,53 @@ class SurFree(MinimizationAttack):
         
         # Get the upper range
         upper = ep.where(
-            ep.logical_and(abs(lower) != self.theta_max, mask), 
+            abs(lower) != self.theta_max, 
             lower + ep.sign(lower) * self.theta_max / self.T,
             ep.zeros_like(lower)
             )
 
-        mask_upper = ep.logical_and(upper == 0, mask)
+        mask_upper = (upper == 0)
         while mask_upper.any():
             # Find the correct lower/upper range
-            upper = ep.where(
-                mask_upper,
-                lower + ep.sign(lower) * self.theta_max / self.T,
-                upper
+            # if True in mask_upper, the range haven't been found
+            new_upper = lower + ep.sign(lower) * self.theta_max / self.T
+            potential_x = function_evolution(new_upper)
+            x = ep.where(
+                atleast_kd(mask_upper, potential_x.ndim),
+                potential_x,
+                ep.zeros_like(potential_x)
             )
-            x = function_evolution(upper)
 
-            mask_upper = mask_upper * self._is_adversarial(x)
-            lower = ep.where(mask_upper, upper, lower) 
+            is_advs =  self._is_adversarial(x)
+            lower = ep.where(ep.logical_and(mask_upper, is_advs), new_upper, lower) 
+            upper = ep.where(ep.logical_and(mask_upper, is_advs.logical_not()), new_upper, upper) 
+            mask_upper = mask_upper * is_advs
 
         step = 0
-        while step < self._BS_max_iteration and (abs(get_alpha(upper) - get_alpha(lower)) > self._BS_gamma).any(): 
+        over_gamma = abs(get_alpha(upper) - get_alpha(lower)) > self._BS_gamma
+        while step < self._BS_max_iteration and over_gamma.any(): 
             mid_bound = (upper + lower) / 2
-            mid = function_evolution(mid_bound)
+            mid = ep.where(
+                atleast_kd(ep.logical_and(mid_bound != 0, over_gamma), v_type.ndim),
+                function_evolution(mid_bound),
+                ep.zeros_like(v_type)
+            )
             is_adv = self._is_adversarial(mid)
 
             mid_opp = ep.where(
-                atleast_kd(ep.astensor(check_opposite), mid.ndim),
+                atleast_kd(ep.logical_and(ep.astensor(check_opposite), over_gamma), mid.ndim),
                 function_evolution(-mid_bound),
                 ep.zeros_like(mid)
             )
             is_adv_opp = self._is_adversarial(mid_opp)
 
-            lower = ep.where(mask * is_adv, mid_bound, lower)
-            lower = ep.where(mask * is_adv.logical_not() * check_opposite * is_adv_opp, -mid_bound, lower)
-            upper = ep.where(mask * is_adv.logical_not() * check_opposite * is_adv_opp, - upper, upper)
-            upper = ep.where(mask * abs(lower) != abs(mid_bound), mid_bound, upper)
+            lower = ep.where(over_gamma * is_adv, mid_bound, lower)
+            lower = ep.where(over_gamma * is_adv.logical_not() * check_opposite * is_adv_opp, -mid_bound, lower)
+            upper = ep.where(over_gamma * is_adv.logical_not() * check_opposite * is_adv_opp, - upper, upper)
+            upper = ep.where(over_gamma * (abs(lower) != abs(mid_bound)), mid_bound, upper)
 
-            check_opposite = mask * check_opposite * is_adv_opp * (lower > 0)
+            check_opposite = over_gamma * check_opposite * is_adv_opp * (lower > 0)
+            over_gamma = abs(get_alpha(upper) - get_alpha(lower)) > self._BS_gamma
 
             step += 1
         return ep.astensor(lower)
@@ -327,13 +354,6 @@ class SurFree(MinimizationAttack):
         epsilons = atleast_kd(epsilons, originals.ndim)
         return (1.0 - epsilons) * originals + epsilons * perturbed
 
-    def _add_step_in_circular_direction(self, direction1: ep.Tensor, direction2: ep.Tensor, r: ep.Tensor, degree: ep.Tensor) -> ep.Tensor:
-        degree = atleast_kd(degree, direction1.ndim).raw
-        r = atleast_kd(r, direction1.ndim)
-        results = self._cos(degree * np.pi/180) * direction1 + self._sin(degree * np.pi/180) * direction2
-        results = results * r * self._cos(degree * np.pi / 180)
-        return ep.astensor(results)
-
     def _set_cos_sin_function(self, v: ep.Tensor) -> None:
         if isinstance(v.raw, torch.Tensor):
             self._cos, self._sin = torch.cos, torch.sin
@@ -355,15 +375,12 @@ class Basis:
                     * Random: No parameters                    
                     * DCT:
                             * function (tanh / constant / linear): function applied on the dct
-                            * alpha
                             * beta
-                            * lambda
-                            * frequence_range: integers or float
-                            * min_dct_value
+                            * gamma
+                            * frequence_range: tuple of 2 float
                             * dct_type: 8x8 or full
         """
         self._originals = originals
-        self._direction_shape = originals.shape[1:]
         self.basis_type = basis_type
 
         self._load_params(**kwargs)
@@ -374,36 +391,32 @@ class Basis:
     def get_vector(self, ortho_with: Optional[Dict] = None, bounds: Tuple[float, float] = (0, 1)) -> ep.Tensor:
         if ortho_with is None:
             ortho_with = {i: None for i in range(len(self._originals))}
+        r: ep.Tensor = getattr(self, "_get_vector_" + self.basis_type)()
 
         vectors = [
-            self.get_vector_i(i, ortho_with[i], bounds).expand_dims(0)
-            for i in range(len(self._originals))
+            self._gram_schmidt(r[i], ortho_with[i]).expand_dims(0)
+            for i in ortho_with
         ]
         return ep.concatenate(vectors, axis=0)
-    
-    def get_vector_i(self, index: int, ortho_with: Optional[ep.Tensor] = None, bounds: Tuple[float, float] = (0, 1)) -> ep.Tensor:
-        r: ep.Tensor = getattr(self, "_get_vector_i_" + self.basis_type)(index, bounds)
 
-        if ortho_with is not None:
-            r_repeated = ep.concatenate([r.expand_dims(0)] * len(ortho_with), axis=0)
-            
-            #inner product
-            gs_coeff = (ortho_with * r_repeated).flatten(1).sum(1)
-            proj = atleast_kd(gs_coeff, ortho_with.ndim) * ortho_with
-            r = r - proj.sum(0)
-        return r / ep.norms.l2(r)
+    def _gram_schmidt(self, v: ep.Tensor, ortho_with: ep.Tensor):
+        v_repeated = ep.concatenate([v.expand_dims(0)] * len(ortho_with), axis=0)
+        
+        #inner product
+        gs_coeff = (ortho_with * v_repeated).flatten(1).sum(1)
+        proj = atleast_kd(gs_coeff, ortho_with.ndim) * ortho_with
+        v = v - proj.sum(0)
+        return v / ep.norms.l2(v)
 
-    def _get_vector_i_dct(self, index: int, bounds: Tuple[float, float]) -> ep.Tensor:
-        r_np = np.zeros(self._direction_shape)
-        for channel, dct_channel in enumerate(self.dcts[index]):
-            probs = np.random.randint(-2, 1, dct_channel.shape) + 1
-            r_np[channel] = dct_channel * probs
-        r_np = idct2_8_8(r_np) + self._beta * (2 * np.random.rand(*r_np.shape) - 1)
-        return ep.from_numpy(self._originals, r_np.astype("float32"))
+    def _get_vector_dct(self) -> ep.Tensor:
+        probs = np.random.randint(-2, 1, self.dcts.shape) + 1
+        r_np = self.dcts * probs
+        r_np = ep.from_numpy(self._originals, self._inverse_dct(r_np).astype("float32"))
+        return r_np + ep.normal(self._originals, r_np.shape, stddev=self._beta)
 
-    def _get_vector_i_random(self, index: int, bounds: Tuple[float, float]) -> ep.Tensor:
-        r = ep.zeros(self._originals, self._direction_shape)
-        r = getattr(ep, self.random_noise)(r, r.shape, *bounds)
+    def _get_vector_random(self) -> ep.Tensor:
+        r = ep.zeros_like(self._originals)
+        r = getattr(ep, self.random_noise)(r, r.shape, 0, 1)
         return ep.astensor(r)
 
     def _load_params(
@@ -412,9 +425,9 @@ class Basis:
             frequence_range: Tuple[float, float] = (0, 1),
             dct_type: str = "8x8",
             function: str = "tanh",
-            lambda_: float = 1
+            gamma: float = 1
             ) -> None:
-        if not hasattr(self, "_get_vector_i_" + self.basis_type):
+        if not hasattr(self, "_get_vector_" + self.basis_type):
             raise ValueError("Basis {} doesn't exist.".format(self.basis_type))
 
         if self.basis_type == "dct":
@@ -422,18 +435,24 @@ class Basis:
             if dct_type == "8x8":
                 mask_size = (8, 8) 
                 dct_function = dct2_8_8
+                self._inverse_dct = idct2_8_8
             elif dct_type == "full":
-                mask_size = (self._direction_shape[-2], self._direction_shape[-1])
-                dct_function = dct2_8_8
+                mask_size = self._originals.shape[-2:]
+                dct_function = lambda x, mask: dct2(x) * mask
+                self._inverse_dct = idct2
             else:
                 raise ValueError("DCT {} doesn't exist.".format(dct_type))
             
             dct_mask = get_zig_zag_mask(frequence_range, mask_size)
-            self.dcts = np.array([dct_function(np.array(image.raw.cpu()), dct_mask) for image in self._originals])
+            print(dct_mask)
+            imsize = self._originals.shape
+            dct_mask = dct_mask.reshape((1, 1, dct_mask.shape[0], dct_mask.shape[1])).repeat(imsize[0], 0).repeat(imsize[1], 1)
+
+            self.dcts = np.array(dct_function(np.array(self._originals.raw.cpu()), dct_mask))
         
-            def get_function(function: str, lambda_: float) -> Callable:
+            def get_function(function: str, gamma: float) -> Callable:
                 if function == "tanh":
-                    return lambda x: np.tanh(lambda_ * x)
+                    return lambda x: np.tanh(gamma * x)
                 elif function == "identity":
                     return lambda x: x
                 elif function == "constant":
@@ -441,7 +460,7 @@ class Basis:
                 else:
                     raise ValueError("Function given for DCT is incorrect.")
 
-            self.dcts = get_function(function, lambda_)(self.dcts)
+            self.dcts = get_function(function, gamma)(self.dcts)
 
 
 ###########################
@@ -450,84 +469,55 @@ class Basis:
 
 
 def dct2(a: Any) -> Any:
-    return fft.dct(fft.dct(a, axis=0, norm='ortho' ), axis=1, norm='ortho')
+    return fft.dct(fft.dct(a, axis=2, norm='ortho' ), axis=3, norm='ortho')
+
 
 def idct2(a: Any) -> Any:
-    return fft.idct(fft.idct(a, axis=0 , norm='ortho'), axis=1 , norm='ortho')
+    return fft.idct(fft.idct(a, axis=2, norm='ortho'), axis=3, norm='ortho')
 
-def dct2_8_8(image: Any, mask: Any=None) -> Any:
-    if mask is None:
-        mask = np.ones((8, 8))
-    if mask.shape != (8, 8):
-        raise ValueError("Mask have to be with a size of (8, 8)")
+
+def dct2_8_8(image: Any, mask: Any) -> Any:
+    assert mask.shape[-2:] == (8, 8)
 
     imsize = image.shape
     dct = np.zeros(imsize)
-    
-    for channel in range(imsize[0]):
-        for i in np.r_[:imsize[1]:8]:
-            for j in np.r_[:imsize[2]:8]:
-                dct_i_j = dct2(image[channel, i:(i+8),j:(j+8)]) 
-                dct[channel, i:(i+8),j:(j+8)] = dct_i_j * mask[:dct_i_j.shape[0], :dct_i_j.shape[1]]
+    for i in np.r_[:imsize[2]:8]:
+        for j in np.r_[:imsize[3]:8]:
+            dct_i_j = dct2(image[:, :, i:(i+8),j:(j+8)]) 
+            dct[:, :, i:(i+8),j:(j+8)] = dct_i_j * mask#[:dct_i_j.shape[0], :dct_i_j.shape[1]]
     return dct
+
 
 def idct2_8_8(dct: Any) -> Any:
     im_dct = np.zeros(dct.shape)
-    
-    for channel in range(dct.shape[0]):
-        for i in np.r_[:dct.shape[1]:8]:
-            for j in np.r_[:dct.shape[2]:8]:
-                im_dct[channel, i:(i+8),j:(j+8)] = idct2(dct[channel, i:(i+8),j:(j+8)] )
+    for i in np.r_[:dct.shape[2]:8]:
+        for j in np.r_[:dct.shape[3]:8]:
+            im_dct[:, :, i:(i+8),j:(j+8)] = idct2(dct[:, :, i:(i+8),j:(j+8)])
     return im_dct
 
-def dct2_full(image: Any, mask: Any = None) -> Any:
-    if mask is None:
-        mask = np.ones(image.shape[-2:])
-
-    imsize = image.shape
-    dct = np.zeros(imsize)
-    
-    for channel in range(imsize[0]):
-            dct_i_j = dct2(image[channel] ) 
-            dct[channel] = dct_i_j * mask
-    return dct
-
-def idct2_full(dct: Any) -> Any:
-    im_dct = np.zeros(dct.shape)
-    
-    for channel in range(dct.shape[0]):
-        im_dct[channel] = idct2(dct[channel])
-    return im_dct
 
 def get_zig_zag_mask(frequence_range: Tuple[float, float], mask_shape: Tuple[int, int] = (8, 8)) -> Any:
     mask = np.zeros(mask_shape)
     s = 0
-    total_component = sum(mask.flatten().shape)
+    total_component = mask_shape[0] * mask_shape[1]
     
-    if frequence_range[1] <= 1:
-        n_coeff = int(total_component * frequence_range[1])
-    else:
-        n_coeff = int(frequence_range[1])
-
-    if frequence_range[0] <= 1:
-        min_coeff = int(total_component * frequence_range[0])
-    else:
-        min_coeff = int(frequence_range[0])
+    n_coeff_kept = int(total_component * min(1, frequence_range[1]))
+    n_coeff_to_start = int(total_component * max(0, frequence_range[0]))
     
-    while n_coeff > 0:
+    while n_coeff_kept > 0:
         for i in range(min(s + 1, mask_shape[0])):
             for j in range(min(s + 1, mask_shape[1])):
                 if i + j == s:
-                    if min_coeff > 0:
-                        min_coeff -= 1
+                    if n_coeff_to_start > 0:
+                        n_coeff_to_start -= 1
                         continue
 
                     if s % 2:
                         mask[i, j] = 1
                     else:
                         mask[j, i] = 1
-                    n_coeff -= 1
-                    if n_coeff == 0:
+                    n_coeff_kept -= 1
+                    if n_coeff_kept == 0:
                         return mask
         s += 1
     return mask
