@@ -20,6 +20,11 @@ from foolbox.attacks.blended_noise import LinearSearchBlendedUniformNoiseAttack
 from foolbox import PyTorchModel
 
 
+from surfree import SurFree
+# If SurFree integrate in FoolBox Run:
+# from foolbox.attacks import SurFree
+
+
 def get_model():
     model = models.resnet18(pretrained=True).eval()
     mean = torch.Tensor([0.485, 0.456, 0.406])
@@ -43,7 +48,7 @@ def get_args():
     parser.add_argument("--n_images", "-n", type=int, default=2, help="N images attacks")
     parser.add_argument(
         "--config_path", 
-        default="../../config_example.json", 
+        default="config_example.json", 
         help="Configuration Path with all the parameter for SurFree. It have to be a dict with the keys init and run."
         )
     return parser.parse_args()
@@ -82,7 +87,7 @@ if __name__ == "__main__":
     print("Attack !")
     time_start = time.time()
 
-    f_attack = fb.attacks.SurFree(**config["init"])
+    f_attack = SurFree(**config["init"])
 
     elements, advs, success = f_attack(fmodel, images, labels, **config["run"])
     print("{:.2f} s to run".format(time.time() - time_start))
