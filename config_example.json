@@ -4,15 +4,15 @@
         "basis_params": {
             "basis_type": "dct",
             "function": "tanh",
-            "dct_type": "8x8",
-            "gamma": 3,
+            "dct_type": "full",
+            "gamma": 1,
             "beta": 0.01,
             "frequence_range": [0, 0.5]
         }
     },
     "init": {
-        "max_queries": 500,
-        "steps": 100,
+        "max_queries": 1000,
+        "steps": 1000,
         "BS_gamma": 0.05,
         "BS_max_iteration": 7,
         "rho": 0.95,
