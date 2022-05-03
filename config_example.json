@@ -3,24 +3,23 @@
         "epsilons": [null],
         "basis_params": {
             "basis_type": "dct",
-            "function": "tanh",
-            "dct_type": "full",
-            "gamma": 1,
-            "beta": 0.01,
+	        "dct_type": "full",
+            "function": "constant",
             "frequence_range": [0, 0.5]
         }
     },
     "init": {
-        "max_queries": 1000,
-        "steps": 1000,
-        "BS_gamma": 0.05,
-        "BS_max_iteration": 7,
-        "rho": 0.95,
-        "T": 1,
+        "steps": 50,
+        "max_queries": 500,
+        "BS_gamma": 0.01,
+        "BS_max_iteration": 10,
+        "rho": 0.98,
+	    "T": 1,
         "theta_max": 30,
-        "n_ortho": 100,
+        "n_ortho": 10,
         "with_distance_line_search": false,
         "with_interpolation": false,
-        "with_alpha_line_search": true
+        "with_alpha_line_search": true,
+        "quantification": false
     }
 }

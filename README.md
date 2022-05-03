@@ -11,17 +11,11 @@ This paper presents *SurFree*, a geometrical approach that achieves a similar dr
 
 # Install
 
-SurFree can be used by installing [Foolbox](https://github.com/bethgelab/foolbox) and importing the SurFree class inf *surfree.py*. 
-
-You can also integrate SurFree with Foolbox by following these instructions. You will be able to use SurFree like any other [Foolbox](https://github.com/bethgelab/foolbox) attack.
-
 * Install requirements
 
 ```bash
 pip install -r requirements
 ```
-
-### Foolbox Integration
 
 * Clone Foolbox Library (This github have been tested for *Foolbox* in version 3.2.1. )
 
@@ -45,7 +39,7 @@ python setup.py install
 
 # Run
 
-You can now run the *main.py*. It will perform the SurFree on some Foolbox test image.
+You can now run the main.py. It will perform the SurFree on the some Foolbox test image.
 You can change the SurFree parameters by giving to him in parameter a *config.json* file.
 
 # Citation

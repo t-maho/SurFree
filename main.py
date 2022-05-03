@@ -1,42 +1,24 @@
+import os
 import json
 import torch
-import os
-import foolbox as fb
 import numpy as np
-import itertools
-import copy
-import pickle
-import eagerpy as ep
-import torchvision.models as models
 import argparse
 import time
 import requests
+import torchvision
 
-from datetime import datetime
 from PIL import Image
-from foolbox.utils import samples
-from foolbox.distances import l2
-from foolbox.attacks.blended_noise import LinearSearchBlendedUniformNoiseAttack
-from foolbox import PyTorchModel
-
-
+from torchvision import transforms as T
+from torchvision.io import read_image
 from surfree import SurFree
-# If SurFree integrate in FoolBox Run:
-# from foolbox.attacks import SurFree
 
 
 def get_model():
-    model = models.resnet18(pretrained=True).eval()
+    model = torchvision.models.resnet18(pretrained=True).eval()
     mean = torch.Tensor([0.485, 0.456, 0.406])
     std = torch.Tensor([0.229, 0.224, 0.225])
-
-    if torch.cuda.is_available():
-        mean = mean.cuda(0)
-        std = std.cuda(0)
-
-    preprocessing = dict(mean=mean, std=std, axis=-3)
-    fmodel = PyTorchModel(model, bounds=(0, 1), preprocessing=preprocessing)
-    return fmodel
+    normalizer = torchvision.transforms.Normalize(mean=mean, std=std)
+    return torch.nn.Sequential(normalizer, model).eval()
 
 def get_imagenet_labels():
     response = requests.get("https://s3.amazonaws.com/deep-learning-models/image-models/imagenet_class_index.json")
@@ -63,7 +45,7 @@ if __name__ == "__main__":
 
     ###############################
     print("Load Model")
-    fmodel = get_model()
+    model = get_model()
 
     ###############################
     print("Load Config")
@@ -80,8 +62,12 @@ if __name__ == "__main__":
     
     ###############################
     print("Load Data")
-    images, labels = samples(fmodel, dataset="imagenet", batchsize=args.n_images)
-    print("{} images loaded with the following labels: {}".format(len(images), labels))
+    X = []
+    transform = T.Compose([T.Resize(256), T.CenterCrop(224)])
+    for img in os.listdir("./images"):
+        X.append(transform(read_image(os.path.join("./images", img))).unsqueeze(0))
+    X = torch.cat(X, 0) / 255
+    y = model(X).argmax(1)
 
     ###############################
     print("Attack !")
@@ -89,17 +75,22 @@ if __name__ == "__main__":
 
     f_attack = SurFree(**config["init"])
 
-    elements, advs, success = f_attack(fmodel, images, labels, **config["run"])
+    if torch.cuda.is_available():
+        model = model.cuda(0)
+        X = X.cuda(0)
+        y = y.cuda(0)
+
+    advs = f_attack(model, X, y, **config["run"])
     print("{:.2f} s to run".format(time.time() - time_start))
 
     ###############################
     print("Results")
-    labels_advs = fmodel(advs[0]).argmax(1)
+    labels_advs = model(advs).argmax(1)
     nqueries = f_attack.get_nqueries()
-    advs_l2 = l2(images, advs[0])
-    for image_i in range(len(images)):
+    advs_l2 = (X - advs).norm(dim=[1, 2]).norm(dim=1)
+    for image_i in range(len(X)):
         print("Adversarial Image {}:".format(image_i))
-        label_o = int(labels[image_i])
+        label_o = int(y[image_i])
         label_adv = int(labels_advs[image_i])
         print("\t- Original label: {}".format(imagenet_labels[str(label_o)]))
         print("\t- Adversarial label: {}".format(imagenet_labels[str(label_adv)]))
@@ -108,11 +99,11 @@ if __name__ == "__main__":
 
     ###############################
     print("Save Results")
-    for image_i, o in enumerate(images):
+    for image_i, o in enumerate(X):
         o = np.array(o * 255).astype(np.uint8)
         img_o = Image.fromarray(o.transpose(1, 2, 0), mode="RGB")
         img_o.save(os.path.join(output_folder, "{}_original.jpg".format(image_i)))
 
-        adv_i = np.array(advs[0][image_i] * 255).astype(np.uint8)
+        adv_i = np.array(advs[image_i] * 255).astype(np.uint8)
         img_adv_i = Image.fromarray(adv_i.transpose(1, 2, 0), mode="RGB")
         img_adv_i.save(os.path.join(output_folder, "{}_adversarial.jpg".format(image_i)))
